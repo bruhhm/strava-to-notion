@@ -442,6 +442,9 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
         }
     if description_text:
         properties["Description"] = {"rich_text": [{"text": {"content": description_text}}]}
+    else:
+        properties["Description"] = {"rich_text": []}
+
     if gear_name:
         properties["Gear"] = {"rich_text": [{"text": {"content": gear_name}}]}
     if perceived_exertion is not None:
@@ -490,7 +493,7 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
             return False
         return True
 
-def sync():
+def sync(force_resync_description=True):
     print("=" * 60)
     print(" Strava to Notion Sync Automation ")
     print("=" * 60)
@@ -538,17 +541,10 @@ def sync():
 
         existing_record = existing_map.get(act_id_str)
         
-        # If record exists and already has valid description, skip
-        is_weight_training = sport_type in ["WeightTraining", "Workout"]
-        if existing_record and existing_record["has_description"]:
-            if is_weight_training and existing_record["photos_count"] > 1:
-                pass  # Re-sync to apply Heatmap Card filter!
-            elif not is_weight_training and existing_record["has_route_map"]:
-                skipped_count += 1
-                continue
-            elif is_weight_training:
-                skipped_count += 1
-                continue
+        # If force_resync_description is False, check skip condition
+        if not force_resync_description and existing_record and existing_record["has_description"]:
+            skipped_count += 1
+            continue
 
         # Fetch detailed activity to get full Description, Gear, Perceived Exertion, and GPS coordinates
         act_detail = fetch_strava_activity_detail(access_token, act_id)
@@ -556,7 +552,7 @@ def sync():
             act_detail = summary  # fallback to summary object
 
         if existing_record:
-            print(f"[+] Updating record with full Hevy description & details: '{act_name}' (ID: {act_id_str})")
+            print(f"[+] Re-syncing description & details: '{act_name}' (ID: {act_id_str})")
             success = save_activity_to_notion(db_id, act_detail, access_token, existing_page_id=existing_record["page_id"])
             if success:
                 updated_count += 1
@@ -566,7 +562,7 @@ def sync():
             if success:
                 synced_count += 1
 
-        time.sleep(0.5)  # Gentle rate limiting for Strava & Notion APIs
+        time.sleep(0.4)  # Gentle rate limiting for Strava & Notion APIs
 
     print("\n" + "=" * 60)
     print(f"[+] SYNC COMPLETED SUCCESSFULLY!")
@@ -576,4 +572,4 @@ def sync():
     print("=" * 60)
 
 if __name__ == "__main__":
-    sync()
+    sync(force_resync_description=True)
