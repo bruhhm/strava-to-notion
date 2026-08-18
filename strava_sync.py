@@ -98,13 +98,14 @@ def find_existing_database():
     return None
 
 def ensure_database_schema(database_id):
-    """Ensure Notion database schema has Description, Gear, and Perceived Exertion properties."""
+    """Ensure Notion database schema has Description, Gear, Perceived Exertion, and Photos properties."""
     url = f"https://api.notion.com/v1/databases/{database_id}"
     payload = {
         "properties": {
             "Description": {"rich_text": {}},
             "Gear": {"rich_text": {}},
-            "Perceived Exertion": {"number": {"format": "number"}}
+            "Perceived Exertion": {"number": {"format": "number"}},
+            "Photos": {"files": {}}
         }
     }
     requests.patch(url, headers=get_notion_headers(), json=payload)
@@ -156,7 +157,8 @@ def create_notion_database(parent_page_id):
         "Location": {"rich_text": {}},
         "Description": {"rich_text": {}},
         "Gear": {"rich_text": {}},
-        "Perceived Exertion": {"number": {"format": "number"}}
+        "Perceived Exertion": {"number": {"format": "number"}},
+        "Photos": {"files": {}}
     }
 
     payload = {
@@ -200,6 +202,7 @@ def get_existing_strava_records(database_id):
             props = page.get("properties", {})
             cover = page.get("cover")
             strava_id_prop = props.get("Strava ID", {}).get("rich_text", [])
+            photos_prop = props.get("Photos", {}).get("files", [])
             if strava_id_prop:
                 strava_id = strava_id_prop[0].get("plain_text", "").strip()
                 desc_prop = props.get("Description", {}).get("rich_text", [])
@@ -207,7 +210,8 @@ def get_existing_strava_records(database_id):
                 existing_map[strava_id] = {
                     "page_id": page_id,
                     "has_description": has_desc,
-                    "has_cover": cover is not None
+                    "has_cover": cover is not None,
+                    "has_photos": bool(photos_prop)
                 }
 
         has_more = data.get("has_more", False)
@@ -335,10 +339,22 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
     if perceived_exertion is not None:
         properties["Perceived Exertion"] = {"number": round(float(perceived_exertion), 1)}
 
-    # Build cover payload if photos exist
+    # Map photos to Photos property (files type)
+    if photo_urls:
+        properties["Photos"] = {
+            "files": [
+                {
+                    "name": f"Strava Photo {idx+1}",
+                    "type": "external",
+                    "external": {"url": p_url}
+                } for idx, p_url in enumerate(photo_urls)
+            ]
+        }
+
+    # Build cover payload if photos exist (keep page header cover)
     cover_payload = {"type": "external", "external": {"url": photo_urls[0]}} if photo_urls else None
 
-    # Build body children blocks for description and photos
+    # Body children blocks: Only keep description callout block (no body image gallery)
     children_blocks = []
     if description_text:
         children_blocks.append({
@@ -347,16 +363,6 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
             "callout": {
                 "rich_text": [{"type": "text", "text": {"content": description_text}}],
                 "icon": {"emoji": "📝"}
-            }
-        })
-
-    for p_url in photo_urls:
-        children_blocks.append({
-            "object": "block",
-            "type": "image",
-            "image": {
-                "type": "external",
-                "external": {"url": p_url}
             }
         })
 
@@ -372,12 +378,12 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
             print(f"[-] Failed to update activity '{name}' (ID: {strava_id_str}): {res.status_code} - {res.text}")
             return False
 
-        # Replace body blocks cleanly (removes old duplicate blocks, appends single fresh block set)
+        # Replace body blocks cleanly (keeps only description callout, removes body image gallery)
         replace_page_children(existing_page_id, children_blocks)
 
         return True
     else:
-        # Create new Notion page with cover and children blocks
+        # Create new Notion page with cover and description block
         url = "https://api.notion.com/v1/pages"
 
         payload = {
@@ -419,7 +425,7 @@ def sync():
                 sys.exit(1)
             db_id = create_notion_database(NOTION_PAGE_ID)
 
-    # Ensure database schema has Description, Gear, and Perceived Exertion
+    # Ensure database schema has Description, Gear, Perceived Exertion, and Photos properties
     ensure_database_schema(db_id)
 
     # 2. Strava Activities Fetch
@@ -442,9 +448,9 @@ def sync():
 
         existing_record = existing_map.get(act_id_str)
         
-        # If record exists and already has description & cover if photos exist, skip
+        # Skip if record exists, has description, and photos property populated if photos exist
         if existing_record and existing_record["has_description"]:
-            if total_photos == 0 or existing_record["has_cover"]:
+            if total_photos == 0 or existing_record["has_photos"]:
                 skipped_count += 1
                 continue
 
@@ -454,7 +460,7 @@ def sync():
             act_detail = summary  # fallback to summary object
 
         if existing_record:
-            print(f"[+] Updating existing record cleanly: '{act_name}' (ID: {act_id_str})")
+            print(f"[+] Updating record with Photos property: '{act_name}' (ID: {act_id_str})")
             success = save_activity_to_notion(db_id, act_detail, access_token, existing_page_id=existing_record["page_id"])
             if success:
                 updated_count += 1
@@ -469,7 +475,7 @@ def sync():
     print("\n" + "=" * 60)
     print(f"[+] SYNC COMPLETED SUCCESSFULLY!")
     print(f"    - New Workouts Added: {synced_count}")
-    print(f"    - Existing Workouts Cleaned/Updated: {updated_count}")
+    print(f"    - Existing Workouts Updated with Photos Property: {updated_count}")
     print(f"    - Already Up-to-Date: {skipped_count}")
     print("=" * 60)
 
