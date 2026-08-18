@@ -243,6 +243,22 @@ def truncate_text(text, max_len=1990):
         return ""
     return text[:max_len] if len(text) > max_len else text
 
+def replace_page_children(page_id, new_children_blocks):
+    """Delete any existing child blocks of a Notion page to prevent duplicate blocks, then append new unique blocks."""
+    url = f"https://api.notion.com/v1/blocks/{page_id}/children"
+    res = requests.get(url, headers=get_notion_headers())
+    if res.status_code == 200:
+        blocks = res.json().get("results", [])
+        for block in blocks:
+            block_id = block["id"]
+            del_url = f"https://api.notion.com/v1/blocks/{block_id}"
+            requests.delete(del_url, headers=get_notion_headers())
+
+    if new_children_blocks:
+        append_url = f"https://api.notion.com/v1/blocks/{page_id}/children"
+        block_payload = {"children": new_children_blocks}
+        requests.patch(append_url, headers=get_notion_headers(), json=block_payload)
+
 def save_activity_to_notion(database_id, activity_detail, access_token, existing_page_id=None):
     strava_id_str = str(activity_detail["id"])
     name = activity_detail.get("name", "Untitled Workout")
@@ -356,11 +372,8 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
             print(f"[-] Failed to update activity '{name}' (ID: {strava_id_str}): {res.status_code} - {res.text}")
             return False
 
-        # Append body blocks (description callout & image gallery) if blocks exist
-        if children_blocks:
-            append_url = f"https://api.notion.com/v1/blocks/{existing_page_id}/children"
-            block_payload = {"children": children_blocks}
-            requests.patch(append_url, headers=get_notion_headers(), json=block_payload)
+        # Replace body blocks cleanly (removes old duplicate blocks, appends single fresh block set)
+        replace_page_children(existing_page_id, children_blocks)
 
         return True
     else:
@@ -429,7 +442,7 @@ def sync():
 
         existing_record = existing_map.get(act_id_str)
         
-        # If record exists, has description, and has cover if photos exist, skip to avoid API overload
+        # If record exists and already has description & cover if photos exist, skip
         if existing_record and existing_record["has_description"]:
             if total_photos == 0 or existing_record["has_cover"]:
                 skipped_count += 1
@@ -441,7 +454,7 @@ def sync():
             act_detail = summary  # fallback to summary object
 
         if existing_record:
-            print(f"[+] Updating existing record with photos & workout notes: '{act_name}' (ID: {act_id_str})")
+            print(f"[+] Updating existing record cleanly: '{act_name}' (ID: {act_id_str})")
             success = save_activity_to_notion(db_id, act_detail, access_token, existing_page_id=existing_record["page_id"])
             if success:
                 updated_count += 1
@@ -456,7 +469,7 @@ def sync():
     print("\n" + "=" * 60)
     print(f"[+] SYNC COMPLETED SUCCESSFULLY!")
     print(f"    - New Workouts Added: {synced_count}")
-    print(f"    - Existing Workouts Updated: {updated_count}")
+    print(f"    - Existing Workouts Cleaned/Updated: {updated_count}")
     print(f"    - Already Up-to-Date: {skipped_count}")
     print("=" * 60)
 
