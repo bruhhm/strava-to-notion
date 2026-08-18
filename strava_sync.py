@@ -64,6 +64,21 @@ def fetch_strava_activity_detail(access_token, activity_id):
         return res.json()
     return None
 
+def fetch_strava_activity_photos(access_token, activity_id):
+    """Fetch photo image URLs for a Strava activity."""
+    url = f"https://www.strava.com/api/v3/activities/{activity_id}/photos?size=600&photo_sources=true"
+    headers = {"Authorization": f"Bearer {access_token}"}
+    res = requests.get(url, headers=headers)
+    if res.status_code == 200:
+        data = res.json()
+        urls = []
+        for p in data:
+            u = p.get("urls", {}).get("600") or p.get("urls", {}).get("100") or p.get("image_url")
+            if u:
+                urls.append(u)
+        return urls
+    return []
+
 def find_existing_database():
     """Search Notion workspace for an existing 'Strava Workout Logs' database."""
     url = "https://api.notion.com/v1/search"
@@ -183,6 +198,7 @@ def get_existing_strava_records(database_id):
         for page in results:
             page_id = page.get("id")
             props = page.get("properties", {})
+            cover = page.get("cover")
             strava_id_prop = props.get("Strava ID", {}).get("rich_text", [])
             if strava_id_prop:
                 strava_id = strava_id_prop[0].get("plain_text", "").strip()
@@ -190,7 +206,8 @@ def get_existing_strava_records(database_id):
                 has_desc = bool(desc_prop and desc_prop[0].get("plain_text", "").strip())
                 existing_map[strava_id] = {
                     "page_id": page_id,
-                    "has_description": has_desc
+                    "has_description": has_desc,
+                    "has_cover": cover is not None
                 }
 
         has_more = data.get("has_more", False)
@@ -226,7 +243,7 @@ def truncate_text(text, max_len=1990):
         return ""
     return text[:max_len] if len(text) > max_len else text
 
-def save_activity_to_notion(database_id, activity_detail, existing_page_id=None):
+def save_activity_to_notion(database_id, activity_detail, access_token, existing_page_id=None):
     strava_id_str = str(activity_detail["id"])
     name = activity_detail.get("name", "Untitled Workout")
     sport_type = activity_detail.get("sport_type") or activity_detail.get("type", "Workout")
@@ -264,6 +281,9 @@ def save_activity_to_notion(database_id, activity_detail, existing_page_id=None)
     gear_name = gear_info.get("name") if isinstance(gear_info, dict) else None
     perceived_exertion = activity_detail.get("perceived_exertion")
 
+    # Fetch Strava activity photos
+    photo_urls = fetch_strava_activity_photos(access_token, strava_id_str)
+
     properties = {
         "Activity Name": {"title": [{"text": {"content": name}}]},
         "Activity Type": {"select": {"name": sport_type}},
@@ -299,52 +319,61 @@ def save_activity_to_notion(database_id, activity_detail, existing_page_id=None)
     if perceived_exertion is not None:
         properties["Perceived Exertion"] = {"number": round(float(perceived_exertion), 1)}
 
+    # Build cover payload if photos exist
+    cover_payload = {"type": "external", "external": {"url": photo_urls[0]}} if photo_urls else None
+
+    # Build body children blocks for description and photos
+    children_blocks = []
+    if description_text:
+        children_blocks.append({
+            "object": "block",
+            "type": "callout",
+            "callout": {
+                "rich_text": [{"type": "text", "text": {"content": description_text}}],
+                "icon": {"emoji": "📝"}
+            }
+        })
+
+    for p_url in photo_urls:
+        children_blocks.append({
+            "object": "block",
+            "type": "image",
+            "image": {
+                "type": "external",
+                "external": {"url": p_url}
+            }
+        })
+
     if existing_page_id:
-        # Update existing Notion page properties
+        # Update existing Notion page properties and cover image
         url = f"https://api.notion.com/v1/pages/{existing_page_id}"
         payload = {"properties": properties}
+        if cover_payload:
+            payload["cover"] = cover_payload
+
         res = requests.patch(url, headers=get_notion_headers(), json=payload)
         if res.status_code != 200:
             print(f"[-] Failed to update activity '{name}' (ID: {strava_id_str}): {res.status_code} - {res.text}")
             return False
 
-        # If description is present, append a block to page body if not already present
-        if description_text:
+        # Append body blocks (description callout & image gallery) if blocks exist
+        if children_blocks:
             append_url = f"https://api.notion.com/v1/blocks/{existing_page_id}/children"
-            block_payload = {
-                "children": [
-                    {
-                        "object": "block",
-                        "type": "callout",
-                        "callout": {
-                            "rich_text": [{"type": "text", "text": {"content": description_text}}],
-                            "icon": {"emoji": "📝"}
-                        }
-                    }
-                ]
-            }
+            block_payload = {"children": children_blocks}
             requests.patch(append_url, headers=get_notion_headers(), json=block_payload)
 
         return True
     else:
-        # Create new Notion page
+        # Create new Notion page with cover and children blocks
         url = "https://api.notion.com/v1/pages"
-        children_blocks = []
-        if description_text:
-            children_blocks.append({
-                "object": "block",
-                "type": "callout",
-                "callout": {
-                    "rich_text": [{"type": "text", "text": {"content": description_text}}],
-                    "icon": {"emoji": "📝"}
-                }
-            })
 
         payload = {
             "parent": {"database_id": database_id},
             "properties": properties,
             "children": children_blocks
         }
+        if cover_payload:
+            payload["cover"] = cover_payload
 
         res = requests.post(url, headers=get_notion_headers(), json=payload)
         if res.status_code != 200:
@@ -396,13 +425,15 @@ def sync():
         act_id = summary["id"]
         act_id_str = str(act_id)
         act_name = summary.get("name", "Workout")
+        total_photos = summary.get("total_photo_count", 0)
 
         existing_record = existing_map.get(act_id_str)
         
-        # If record exists and already has description, skip to avoid API overload
+        # If record exists, has description, and has cover if photos exist, skip to avoid API overload
         if existing_record and existing_record["has_description"]:
-            skipped_count += 1
-            continue
+            if total_photos == 0 or existing_record["has_cover"]:
+                skipped_count += 1
+                continue
 
         # Fetch detailed activity to get full Description, Gear, and Perceived Exertion
         act_detail = fetch_strava_activity_detail(access_token, act_id)
@@ -410,13 +441,13 @@ def sync():
             act_detail = summary  # fallback to summary object
 
         if existing_record:
-            print(f"[+] Updating existing record with workout notes & details: '{act_name}' (ID: {act_id_str})")
-            success = save_activity_to_notion(db_id, act_detail, existing_page_id=existing_record["page_id"])
+            print(f"[+] Updating existing record with photos & workout notes: '{act_name}' (ID: {act_id_str})")
+            success = save_activity_to_notion(db_id, act_detail, access_token, existing_page_id=existing_record["page_id"])
             if success:
                 updated_count += 1
         else:
             print(f"[+] Syncing new activity: '{act_name}' (ID: {act_id_str}, Date: {summary.get('start_date')})")
-            success = save_activity_to_notion(db_id, act_detail)
+            success = save_activity_to_notion(db_id, act_detail, access_token)
             if success:
                 synced_count += 1
 
