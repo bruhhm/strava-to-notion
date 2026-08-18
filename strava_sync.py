@@ -288,7 +288,8 @@ def get_existing_strava_records(database_id):
             if strava_id_prop:
                 strava_id = strava_id_prop[0].get("plain_text", "").strip()
                 desc_prop = props.get("Description", {}).get("rich_text", [])
-                has_desc = bool(desc_prop and desc_prop[0].get("plain_text", "").strip())
+                desc_text = desc_prop[0].get("plain_text", "").strip() if desc_prop else ""
+                has_desc = bool(desc_text) and not desc_text.startswith("Evaluation:")
                 existing_map[strava_id] = {
                     "page_id": page_id,
                     "has_description": has_desc,
@@ -537,13 +538,17 @@ def sync():
 
         existing_record = existing_map.get(act_id_str)
         
-        # If weight training and currently has multiple photos (includes fun-fact graphics), force update to filter to 1 Heatmap card!
+        # If record exists and already has valid description, skip
         is_weight_training = sport_type in ["WeightTraining", "Workout"]
-        if existing_record and is_weight_training and existing_record["photos_count"] > 1:
-            pass  # Re-sync to apply Heatmap Card filter!
-        elif existing_record and existing_record["has_route_map"]:
-            skipped_count += 1
-            continue
+        if existing_record and existing_record["has_description"]:
+            if is_weight_training and existing_record["photos_count"] > 1:
+                pass  # Re-sync to apply Heatmap Card filter!
+            elif not is_weight_training and existing_record["has_route_map"]:
+                skipped_count += 1
+                continue
+            elif is_weight_training:
+                skipped_count += 1
+                continue
 
         # Fetch detailed activity to get full Description, Gear, Perceived Exertion, and GPS coordinates
         act_detail = fetch_strava_activity_detail(access_token, act_id)
@@ -551,7 +556,7 @@ def sync():
             act_detail = summary  # fallback to summary object
 
         if existing_record:
-            print(f"[+] Updating record with filtered Hevy Heatmap Card: '{act_name}' (ID: {act_id_str})")
+            print(f"[+] Updating record with full Hevy description & details: '{act_name}' (ID: {act_id_str})")
             success = save_activity_to_notion(db_id, act_detail, access_token, existing_page_id=existing_record["page_id"])
             if success:
                 updated_count += 1
@@ -566,7 +571,7 @@ def sync():
     print("\n" + "=" * 60)
     print(f"[+] SYNC COMPLETED SUCCESSFULLY!")
     print(f"    - New Workouts Added: {synced_count}")
-    print(f"    - Existing Workouts Updated with Filtered Photos: {updated_count}")
+    print(f"    - Existing Workouts Updated with Full Description: {updated_count}")
     print(f"    - Already Up-to-Date: {skipped_count}")
     print("=" * 60)
 
