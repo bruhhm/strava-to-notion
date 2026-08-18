@@ -493,7 +493,7 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
             return False
         return True
 
-def sync(force_resync_description=True):
+def sync(force_resync_description=False):
     print("=" * 60)
     print(" Strava to Notion Sync Automation ")
     print("=" * 60)
@@ -543,8 +543,15 @@ def sync(force_resync_description=True):
         
         # If force_resync_description is False, check skip condition
         if not force_resync_description and existing_record and existing_record["has_description"]:
-            skipped_count += 1
-            continue
+            is_weight_training = sport_type in ["WeightTraining", "Workout"]
+            if is_weight_training and existing_record["photos_count"] > 1:
+                pass  # Re-sync to apply Heatmap Card filter!
+            elif not is_weight_training and existing_record["has_route_map"]:
+                skipped_count += 1
+                continue
+            elif is_weight_training:
+                skipped_count += 1
+                continue
 
         # Fetch detailed activity to get full Description, Gear, Perceived Exertion, and GPS coordinates
         act_detail = fetch_strava_activity_detail(access_token, act_id)
@@ -572,4 +579,4 @@ def sync(force_resync_description=True):
     print("=" * 60)
 
 if __name__ == "__main__":
-    sync(force_resync_description=True)
+    sync(force_resync_description=False)
