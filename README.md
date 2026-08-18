@@ -1,35 +1,38 @@
-# 🏃 Strava to Notion Workout Log Automation
+# Strava to Notion Workout Log Automation
 
 An automated sync engine built in Python that fetches your Strava activities and syncs them into a dedicated **Notion Database** ("Strava Workout Logs"), mapping every activity detail to a distinct Notion property using Metric units.
 
 ---
 
-## 🌟 Key Features
+## Key Features
 
 - **Detailed Property Mapping**: Every Strava metric is stored in a dedicated database property:
-  - 📌 **Activity Name** (Title)
-  - 🏃 **Activity Type** (Select: Run, Ride, Swim, Walk, Hike, WeightTraining, Workout, etc.)
-  - 📅 **Date** (Date & Time ISO 8601)
-  - 📏 **Distance (km)** (Number)
-  - ⏱️ **Moving Time** (Rich Text: `HH:MM:SS`) & **Moving Time (min)** (Number)
-  - ⌛ **Elapsed Time** (Rich Text: `HH:MM:SS`)
-  - ⚡ **Pace (min/km)** (Rich Text for foot sports, e.g. `5:15 /km`)
-  - 🚴 **Avg Speed (km/h)** & **Max Speed (km/h)** (Number)
-  - ⛰️ **Elevation Gain (m)** (Number)
-  - ❤️ **Avg Heart Rate (bpm)** & **Max Heart Rate (bpm)** (Number)
-  - 🔥 **Calories (kcal)** (Number)
-  - 📈 **Relative Effort** (Number)
-  - 🚴 **Commute** & 🏋️ **Trainer** (Checkboxes)
-  - 🆔 **Strava ID** (Rich Text - unique deduplication key)
-  - 🔗 **Strava Link** (URL direct link)
-  - 📍 **Location** (Rich Text)
+  - **Activity Name** (Title)
+  - **Activity Type** (Select: Run, Ride, Swim, Walk, Hike, WeightTraining, Workout, etc.)
+  - **Date** (Date & Time ISO 8601)
+  - **Distance (km)** (Number)
+  - **Moving Time** (Rich Text: `HH:MM:SS`) & **Moving Time (min)** (Number)
+  - **Elapsed Time** (Rich Text: `HH:MM:SS`)
+  - **Pace (min/km)** (Rich Text for foot sports, e.g. `5:15 /km`)
+  - **Avg Speed (km/h)** & **Max Speed (km/h)** (Number)
+  - **Elevation Gain (m)** (Number)
+  - **Avg Heart Rate (bpm)** & **Max Heart Rate (bpm)** (Number)
+  - **Calories (kcal)** (Number)
+  - **Relative Effort** (Number)
+  - **Description** (Rich Text - workout notes and set logs)
+  - **Gear** (Rich Text - equipment/shoes used)
+  - **Perceived Exertion** (Number - self-reported effort rating)
+  - **Commute** & **Trainer** (Checkboxes)
+  - **Strava ID** (Rich Text - unique deduplication key)
+  - **Strava Link** (URL direct link)
+  - **Location** (Rich Text)
 - **Automatic Database Creation**: If the database doesn't exist, the script automatically creates a formatted "Strava Workout Logs" database inside your designated Notion page.
 - **Smart Deduplication**: Queries existing Notion records by `Strava ID` to avoid creating duplicate entries.
 - **24/7 Background Automation**: Ready to run automatically on a schedule via **GitHub Actions**.
 
 ---
 
-## 🛠️ Setup Instructions
+## Setup Instructions
 
 ### Step 1: Notion Integration Setup
 
@@ -59,7 +62,7 @@ This will launch a browser window asking you to grant access (`read,activity:rea
 
 ---
 
-## 🚀 Local Execution
+## Local Execution
 
 1. Copy `.env.example` to `.env`:
    ```bash
@@ -81,7 +84,7 @@ This will launch a browser window asking you to grant access (`read,activity:rea
 
 ---
 
-## 🤖 Continuous Automation via GitHub Actions
+## Continuous Automation via GitHub Actions
 
 To run this sync automatically every 6 hours without hosting a server:
 
