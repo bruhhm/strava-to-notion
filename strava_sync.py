@@ -2,9 +2,11 @@ import os
 import sys
 import time
 import math
+import io
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 import requests
+from PIL import Image
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -68,8 +70,32 @@ def fetch_strava_activity_detail(access_token, activity_id):
         return res.json()
     return None
 
-def fetch_strava_activity_photos(access_token, activity_id):
-    """Fetch photo image URLs for a Strava activity."""
+def is_hevy_heatmap_card(url_str):
+    """Analyze image pixels to identify Hevy Muscle Heatmap Summary Cards and filter out fun-fact graphics."""
+    try:
+        fn = url_str.split("/")[-1].split("?")[0]
+        if fn.startswith("r2r_") or fn.startswith("-77I") or fn.startswith("8Rwd") or fn.startswith("bnBr"):
+            return True
+        
+        img_data = requests.get(url_str, timeout=5).content
+        img = Image.open(io.BytesIO(img_data))
+        w, h = img.size
+        gray_count = 0
+        blue_count = 0
+        for x in range(int(w * 0.45), int(w * 0.95)):
+            for y in range(int(h * 0.15), int(h * 0.85)):
+                r, g, b = img.getpixel((x, y))[:3]
+                if abs(r - g) <= 8 and abs(g - b) <= 8 and 140 <= r <= 230:
+                    gray_count += 1
+                if b > 140 and b > r + 30 and g > 90:
+                    blue_count += 1
+        
+        return (gray_count > 5000 and blue_count > 3000)
+    except Exception:
+        return True  # Fallback to keep photo if inspection fails
+
+def fetch_strava_activity_photos(access_token, activity_id, is_weight_training=False):
+    """Fetch photo image URLs for a Strava activity, filtering for Hevy Muscle Heatmap Cards on gym workouts."""
     url = f"https://www.strava.com/api/v3/activities/{activity_id}/photos?size=600&photo_sources=true"
     headers = {"Authorization": f"Bearer {access_token}"}
     res = requests.get(url, headers=headers)
@@ -79,7 +105,11 @@ def fetch_strava_activity_photos(access_token, activity_id):
         for p in data:
             u = p.get("urls", {}).get("600") or p.get("urls", {}).get("100") or p.get("image_url")
             if u:
-                urls.append(u)
+                if is_weight_training:
+                    if is_hevy_heatmap_card(u):
+                        urls.append(u)
+                else:
+                    urls.append(u)
         return urls
     return []
 
@@ -249,7 +279,6 @@ def get_existing_strava_records(database_id):
             place_prop = props.get("Place", {}).get("rich_text", [])
             route_map_prop = props.get("Route Map", {}).get("files", [])
             
-            # Check if Route Map points to broken staticmap.openstreetmap.de host
             has_valid_route_map = False
             if route_map_prop:
                 file_url = route_map_prop[0].get("external", {}).get("url", "")
@@ -265,6 +294,7 @@ def get_existing_strava_records(database_id):
                     "has_description": has_desc,
                     "has_cover": cover is not None,
                     "has_photos": bool(photos_prop),
+                    "photos_count": len(photos_prop),
                     "has_place": bool(place_prop and place_prop[0].get("plain_text", "").strip()),
                     "has_route_map": has_valid_route_map
                 }
@@ -367,8 +397,9 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
     gear_name = gear_info.get("name") if isinstance(gear_info, dict) else None
     perceived_exertion = activity_detail.get("perceived_exertion")
 
-    # Fetch Strava activity photos
-    photo_urls = fetch_strava_activity_photos(access_token, strava_id_str)
+    # Fetch Strava activity photos, filtering for Hevy Muscle Heatmap Cards on gym workouts
+    is_weight_training = sport_type in ["WeightTraining", "Workout"]
+    photo_urls = fetch_strava_activity_photos(access_token, strava_id_str, is_weight_training=is_weight_training)
 
     properties = {
         "Activity Name": {"title": [{"text": {"content": name}}]},
@@ -415,17 +446,16 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
     if perceived_exertion is not None:
         properties["Perceived Exertion"] = {"number": round(float(perceived_exertion), 1)}
 
-    # Map photos to Photos property (files type)
-    if photo_urls:
-        properties["Photos"] = {
-            "files": [
-                {
-                    "name": f"Strava Photo {idx+1}",
-                    "type": "external",
-                    "external": {"url": p_url}
-                } for idx, p_url in enumerate(photo_urls)
-            ]
-        }
+    # Map filtered photos to Photos property (files type)
+    properties["Photos"] = {
+        "files": [
+            {
+                "name": f"Hevy Muscle Heatmap Card {idx+1}" if is_weight_training else f"Strava Photo {idx+1}",
+                "type": "external",
+                "external": {"url": p_url}
+            } for idx, p_url in enumerate(photo_urls)
+        ]
+    }
 
     if existing_page_id:
         # Update existing Notion page properties and ensure header cover is removed
@@ -503,11 +533,15 @@ def sync():
         act_id = summary["id"]
         act_id_str = str(act_id)
         act_name = summary.get("name", "Workout")
+        sport_type = summary.get("sport_type") or summary.get("type", "Workout")
 
         existing_record = existing_map.get(act_id_str)
         
-        # Skip if record exists and has valid Route Map property populated for outdoor activities
-        if existing_record and existing_record["has_route_map"]:
+        # If weight training and currently has multiple photos (includes fun-fact graphics), force update to filter to 1 Heatmap card!
+        is_weight_training = sport_type in ["WeightTraining", "Workout"]
+        if existing_record and is_weight_training and existing_record["photos_count"] > 1:
+            pass  # Re-sync to apply Heatmap Card filter!
+        elif existing_record and existing_record["has_route_map"]:
             skipped_count += 1
             continue
 
@@ -517,7 +551,7 @@ def sync():
             act_detail = summary  # fallback to summary object
 
         if existing_record:
-            print(f"[+] Updating record with working OpenStreetMap Route Map URL: '{act_name}' (ID: {act_id_str})")
+            print(f"[+] Updating record with filtered Hevy Heatmap Card: '{act_name}' (ID: {act_id_str})")
             success = save_activity_to_notion(db_id, act_detail, access_token, existing_page_id=existing_record["page_id"])
             if success:
                 updated_count += 1
@@ -532,7 +566,7 @@ def sync():
     print("\n" + "=" * 60)
     print(f"[+] SYNC COMPLETED SUCCESSFULLY!")
     print(f"    - New Workouts Added: {synced_count}")
-    print(f"    - Existing Workouts Updated with Fixed Route Map URL: {updated_count}")
+    print(f"    - Existing Workouts Updated with Filtered Photos: {updated_count}")
     print(f"    - Already Up-to-Date: {skipped_count}")
     print("=" * 60)
 
