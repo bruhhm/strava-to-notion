@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import math
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 import requests
@@ -83,7 +84,7 @@ def fetch_strava_activity_photos(access_token, activity_id):
     return []
 
 def generate_static_map_url(lat, lng, polyline_str=""):
-    """Generate static map image URL centered on activity GPS location."""
+    """Generate static map image URL centered on activity GPS location using OpenStreetMap Tile CDN."""
     if not lat or not lng:
         return None
     
@@ -91,8 +92,13 @@ def generate_static_map_url(lat, lng, polyline_str=""):
         enc_poly = urllib.parse.quote(polyline_str)
         return f"https://api.mapbox.com/styles/v1/mapbox/outdoors-v11/static/path-4+ff5500-1({enc_poly})/auto/600x300?access_token={MAPBOX_TOKEN}"
     
-    # OpenStreetMap Static Map fallback
-    return f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lng}&zoom=14&size=600x300&maptype=mapnik"
+    # High-performance OpenStreetMap Tile renderer
+    zoom = 14
+    lat_rad = math.radians(lat)
+    n = 2.0 ** zoom
+    xtile = int((lng + 180.0) / 360.0 * n)
+    ytile = int((1.0 - math.log(math.tan(lat_rad) + (1.0 / math.cos(lat_rad))) / math.pi) / 2.0 * n)
+    return f"https://tile.openstreetmap.org/{zoom}/{xtile}/{ytile}.png"
 
 def reverse_geocode(lat, lng):
     """Convert GPS coordinates (latitude, longitude) into readable Place string using OpenStreetMap Nominatim."""
@@ -242,6 +248,14 @@ def get_existing_strava_records(database_id):
             photos_prop = props.get("Photos", {}).get("files", [])
             place_prop = props.get("Place", {}).get("rich_text", [])
             route_map_prop = props.get("Route Map", {}).get("files", [])
+            
+            # Check if Route Map points to broken staticmap.openstreetmap.de host
+            has_valid_route_map = False
+            if route_map_prop:
+                file_url = route_map_prop[0].get("external", {}).get("url", "")
+                if "tile.openstreetmap.org" in file_url or "mapbox.com" in file_url:
+                    has_valid_route_map = True
+
             if strava_id_prop:
                 strava_id = strava_id_prop[0].get("plain_text", "").strip()
                 desc_prop = props.get("Description", {}).get("rich_text", [])
@@ -252,7 +266,7 @@ def get_existing_strava_records(database_id):
                     "has_cover": cover is not None,
                     "has_photos": bool(photos_prop),
                     "has_place": bool(place_prop and place_prop[0].get("plain_text", "").strip()),
-                    "has_route_map": bool(route_map_prop)
+                    "has_route_map": has_valid_route_map
                 }
 
         has_more = data.get("has_more", False)
@@ -332,7 +346,7 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
 
     suffer_score = activity_detail.get("suffer_score") or activity_detail.get("suf_score")
 
-    # Reverse geocode GPS coordinates to Place string
+    # Reverse geocode GPS coordinates to Place string and generate Route Map tile URL
     place_str = ""
     start_latlng = activity_detail.get("start_latlng")
     summary_polyline = activity_detail.get("map", {}).get("summary_polyline", "")
@@ -489,11 +503,10 @@ def sync():
         act_id = summary["id"]
         act_id_str = str(act_id)
         act_name = summary.get("name", "Workout")
-        start_latlng = summary.get("start_latlng")
 
         existing_record = existing_map.get(act_id_str)
         
-        # Skip if record exists and has Route Map property populated for outdoor activities
+        # Skip if record exists and has valid Route Map property populated for outdoor activities
         if existing_record and existing_record["has_route_map"]:
             skipped_count += 1
             continue
@@ -504,7 +517,7 @@ def sync():
             act_detail = summary  # fallback to summary object
 
         if existing_record:
-            print(f"[+] Updating record with Route Map property: '{act_name}' (ID: {act_id_str})")
+            print(f"[+] Updating record with working OpenStreetMap Route Map URL: '{act_name}' (ID: {act_id_str})")
             success = save_activity_to_notion(db_id, act_detail, access_token, existing_page_id=existing_record["page_id"])
             if success:
                 updated_count += 1
@@ -519,7 +532,7 @@ def sync():
     print("\n" + "=" * 60)
     print(f"[+] SYNC COMPLETED SUCCESSFULLY!")
     print(f"    - New Workouts Added: {synced_count}")
-    print(f"    - Existing Workouts Updated with Route Map Property: {updated_count}")
+    print(f"    - Existing Workouts Updated with Fixed Route Map URL: {updated_count}")
     print(f"    - Already Up-to-Date: {skipped_count}")
     print("=" * 60)
 
