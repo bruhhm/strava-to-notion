@@ -442,8 +442,6 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
         }
     if description_text:
         properties["Description"] = {"rich_text": [{"text": {"content": description_text}}]}
-    else:
-        properties["Description"] = {"rich_text": []}
 
     if gear_name:
         properties["Gear"] = {"rich_text": [{"text": {"content": gear_name}}]}
