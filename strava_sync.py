@@ -351,10 +351,7 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
             ]
         }
 
-    # Build cover payload if photos exist (keep page header cover)
-    cover_payload = {"type": "external", "external": {"url": photo_urls[0]}} if photo_urls else None
-
-    # Body children blocks: Only keep description callout block (no body image gallery)
+    # Body children blocks: Only keep description callout block (no header cover, no body image gallery)
     children_blocks = []
     if description_text:
         children_blocks.append({
@@ -367,11 +364,12 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
         })
 
     if existing_page_id:
-        # Update existing Notion page properties and cover image
+        # Update existing Notion page properties and remove header cover image
         url = f"https://api.notion.com/v1/pages/{existing_page_id}"
-        payload = {"properties": properties}
-        if cover_payload:
-            payload["cover"] = cover_payload
+        payload = {
+            "properties": properties,
+            "cover": None  # Explicitly remove header cover image
+        }
 
         res = requests.patch(url, headers=get_notion_headers(), json=payload)
         if res.status_code != 200:
@@ -383,7 +381,7 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
 
         return True
     else:
-        # Create new Notion page with cover and description block
+        # Create new Notion page without header cover image
         url = "https://api.notion.com/v1/pages"
 
         payload = {
@@ -391,8 +389,6 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
             "properties": properties,
             "children": children_blocks
         }
-        if cover_payload:
-            payload["cover"] = cover_payload
 
         res = requests.post(url, headers=get_notion_headers(), json=payload)
         if res.status_code != 200:
@@ -448,8 +444,8 @@ def sync():
 
         existing_record = existing_map.get(act_id_str)
         
-        # Skip if record exists, has description, and photos property populated if photos exist
-        if existing_record and existing_record["has_description"]:
+        # Skip if record exists, has description, has photos property if photos exist, and has NO cover
+        if existing_record and existing_record["has_description"] and not existing_record["has_cover"]:
             if total_photos == 0 or existing_record["has_photos"]:
                 skipped_count += 1
                 continue
@@ -460,7 +456,7 @@ def sync():
             act_detail = summary  # fallback to summary object
 
         if existing_record:
-            print(f"[+] Updating record with Photos property: '{act_name}' (ID: {act_id_str})")
+            print(f"[+] Removing header cover image & updating Photos property: '{act_name}' (ID: {act_id_str})")
             success = save_activity_to_notion(db_id, act_detail, access_token, existing_page_id=existing_record["page_id"])
             if success:
                 updated_count += 1
@@ -475,7 +471,7 @@ def sync():
     print("\n" + "=" * 60)
     print(f"[+] SYNC COMPLETED SUCCESSFULLY!")
     print(f"    - New Workouts Added: {synced_count}")
-    print(f"    - Existing Workouts Updated with Photos Property: {updated_count}")
+    print(f"    - Existing Workouts Updated: {updated_count}")
     print(f"    - Already Up-to-Date: {skipped_count}")
     print("=" * 60)
 
