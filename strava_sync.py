@@ -48,7 +48,7 @@ def get_strava_access_token():
     print("[+] Strava access token refreshed successfully.")
     return data["access_token"]
 
-def fetch_strava_activities(access_token, days_back=60):
+def fetch_strava_activities(access_token, days_back=365):
     print(f"[+] Fetching Strava activity list from the last {days_back} days...")
     after_timestamp = int((datetime.now(timezone.utc) - timedelta(days=days_back)).timestamp())
     url = f"https://www.strava.com/api/v3/athlete/activities?after={after_timestamp}&per_page=200"
@@ -519,9 +519,9 @@ def sync(force_resync_description=False):
     # Ensure database schema has Description, Gear, Perceived Exertion, Photos, Place, and Route Map properties
     ensure_database_schema(db_id)
 
-    # 2. Strava Activities Fetch
+    # 2. Strava Activities Fetch (Fetch all activities from the past 365 days)
     access_token = get_strava_access_token()
-    activities_summary = fetch_strava_activities(access_token, days_back=60)
+    activities_summary = fetch_strava_activities(access_token, days_back=365)
 
     # 3. Deduplication and Record map
     existing_map = get_existing_strava_records(db_id)
