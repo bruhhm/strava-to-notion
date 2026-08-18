@@ -247,8 +247,8 @@ def truncate_text(text, max_len=1990):
         return ""
     return text[:max_len] if len(text) > max_len else text
 
-def replace_page_children(page_id, new_children_blocks):
-    """Delete any existing child blocks of a Notion page to prevent duplicate blocks, then append new unique blocks."""
+def replace_page_children(page_id, new_children_blocks=None):
+    """Delete any existing child blocks of a Notion page to ensure completely empty page bodies, then append new blocks if provided."""
     url = f"https://api.notion.com/v1/blocks/{page_id}/children"
     res = requests.get(url, headers=get_notion_headers())
     if res.status_code == 200:
@@ -351,24 +351,12 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
             ]
         }
 
-    # Body children blocks: Only keep description callout block (no header cover, no body image gallery)
-    children_blocks = []
-    if description_text:
-        children_blocks.append({
-            "object": "block",
-            "type": "callout",
-            "callout": {
-                "rich_text": [{"type": "text", "text": {"content": description_text}}],
-                "icon": {"emoji": "📝"}
-            }
-        })
-
     if existing_page_id:
-        # Update existing Notion page properties and remove header cover image
+        # Update existing Notion page properties and ensure header cover is removed
         url = f"https://api.notion.com/v1/pages/{existing_page_id}"
         payload = {
             "properties": properties,
-            "cover": None  # Explicitly remove header cover image
+            "cover": None
         }
 
         res = requests.patch(url, headers=get_notion_headers(), json=payload)
@@ -376,18 +364,17 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
             print(f"[-] Failed to update activity '{name}' (ID: {strava_id_str}): {res.status_code} - {res.text}")
             return False
 
-        # Replace body blocks cleanly (keeps only description callout, removes body image gallery)
-        replace_page_children(existing_page_id, children_blocks)
+        # Clear any existing body blocks so description exists purely as a property
+        replace_page_children(existing_page_id, new_children_blocks=[])
 
         return True
     else:
-        # Create new Notion page without header cover image
+        # Create new Notion page without body blocks
         url = "https://api.notion.com/v1/pages"
 
         payload = {
             "parent": {"database_id": database_id},
-            "properties": properties,
-            "children": children_blocks
+            "properties": properties
         }
 
         res = requests.post(url, headers=get_notion_headers(), json=payload)
@@ -443,12 +430,6 @@ def sync():
         total_photos = summary.get("total_photo_count", 0)
 
         existing_record = existing_map.get(act_id_str)
-        
-        # Skip if record exists, has description, has photos property if photos exist, and has NO cover
-        if existing_record and existing_record["has_description"] and not existing_record["has_cover"]:
-            if total_photos == 0 or existing_record["has_photos"]:
-                skipped_count += 1
-                continue
 
         # Fetch detailed activity to get full Description, Gear, and Perceived Exertion
         act_detail = fetch_strava_activity_detail(access_token, act_id)
@@ -456,7 +437,7 @@ def sync():
             act_detail = summary  # fallback to summary object
 
         if existing_record:
-            print(f"[+] Removing header cover image & updating Photos property: '{act_name}' (ID: {act_id_str})")
+            print(f"[+] Cleaning page body & updating Description property: '{act_name}' (ID: {act_id_str})")
             success = save_activity_to_notion(db_id, act_detail, access_token, existing_page_id=existing_record["page_id"])
             if success:
                 updated_count += 1
@@ -471,7 +452,7 @@ def sync():
     print("\n" + "=" * 60)
     print(f"[+] SYNC COMPLETED SUCCESSFULLY!")
     print(f"    - New Workouts Added: {synced_count}")
-    print(f"    - Existing Workouts Updated: {updated_count}")
+    print(f"    - Existing Workouts Updated (Body Cleaned): {updated_count}")
     print(f"    - Already Up-to-Date: {skipped_count}")
     print("=" * 60)
 
