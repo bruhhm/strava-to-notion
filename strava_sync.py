@@ -168,7 +168,7 @@ def find_existing_database():
     return None
 
 def ensure_database_schema(database_id):
-    """Ensure Notion database schema has Description, Gear, Perceived Exertion, Photos, Place, and Route Map properties."""
+    """Ensure Notion database schema has Description, Gear, Perceived Exertion, Photos, Place, Route Map, and Muscle Heatmap properties."""
     url = f"https://api.notion.com/v1/databases/{database_id}"
     payload = {
         "properties": {
@@ -177,7 +177,8 @@ def ensure_database_schema(database_id):
             "Perceived Exertion": {"number": {"format": "number"}},
             "Photos": {"files": {}},
             "Place": {"rich_text": {}},
-            "Route Map": {"files": {}}
+            "Route Map": {"files": {}},
+            "Muscle Heatmap": {"files": {}}
         }
     }
     requests.patch(url, headers=get_notion_headers(), json=payload)
@@ -228,6 +229,7 @@ def create_notion_database(parent_page_id):
         "Strava Link": {"url": {}},
         "Place": {"rich_text": {}},
         "Route Map": {"files": {}},
+        "Muscle Heatmap": {"files": {}},
         "Description": {"rich_text": {}},
         "Gear": {"rich_text": {}},
         "Perceived Exertion": {"number": {"format": "number"}},
@@ -278,6 +280,7 @@ def get_existing_strava_records(database_id):
             photos_prop = props.get("Photos", {}).get("files", [])
             place_prop = props.get("Place", {}).get("rich_text", [])
             route_map_prop = props.get("Route Map", {}).get("files", [])
+            heatmap_prop = props.get("Muscle Heatmap", {}).get("files", [])
             
             has_valid_route_map = False
             if route_map_prop:
@@ -297,7 +300,8 @@ def get_existing_strava_records(database_id):
                     "has_photos": bool(photos_prop),
                     "photos_count": len(photos_prop),
                     "has_place": bool(place_prop and place_prop[0].get("plain_text", "").strip()),
-                    "has_route_map": has_valid_route_map
+                    "has_route_map": has_valid_route_map,
+                    "has_heatmap": bool(heatmap_prop)
                 }
 
         has_more = data.get("has_more", False)
@@ -448,7 +452,7 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
     if perceived_exertion is not None:
         properties["Perceived Exertion"] = {"number": round(float(perceived_exertion), 1)}
 
-    # Map filtered photos to Photos property (files type)
+    # Map photos to Photos property & dedicated Muscle Heatmap property
     properties["Photos"] = {
         "files": [
             {
@@ -458,6 +462,17 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
             } for idx, p_url in enumerate(photo_urls)
         ]
     }
+
+    if is_weight_training and photo_urls:
+        properties["Muscle Heatmap"] = {
+            "files": [
+                {
+                    "name": f"Muscle Heatmap Card {idx+1}",
+                    "type": "external",
+                    "external": {"url": p_url}
+                } for idx, p_url in enumerate(photo_urls)
+            ]
+        }
 
     if existing_page_id:
         # Update existing Notion page properties and ensure header cover is removed
@@ -516,7 +531,7 @@ def sync(force_resync_description=False):
                 sys.exit(1)
             db_id = create_notion_database(NOTION_PAGE_ID)
 
-    # Ensure database schema has Description, Gear, Perceived Exertion, Photos, Place, and Route Map properties
+    # Ensure database schema has Description, Gear, Perceived Exertion, Photos, Place, Route Map, and Muscle Heatmap properties
     ensure_database_schema(db_id)
 
     # 2. Strava Activities Fetch (Fetch all activities from the past 365 days)
@@ -540,9 +555,11 @@ def sync(force_resync_description=False):
         existing_record = existing_map.get(act_id_str)
         
         # If force_resync_description is False, check skip condition
+        is_weight_training = sport_type in ["WeightTraining", "Workout"]
         if not force_resync_description and existing_record and existing_record["has_description"]:
-            is_weight_training = sport_type in ["WeightTraining", "Workout"]
-            if is_weight_training and existing_record["photos_count"] > 1:
+            if is_weight_training and not existing_record.get("has_heatmap"):
+                pass  # Update to populate new Muscle Heatmap property!
+            elif is_weight_training and existing_record["photos_count"] > 1:
                 pass  # Re-sync to apply Heatmap Card filter!
             elif not is_weight_training and existing_record["has_route_map"]:
                 skipped_count += 1
@@ -557,7 +574,7 @@ def sync(force_resync_description=False):
             act_detail = summary  # fallback to summary object
 
         if existing_record:
-            print(f"[+] Re-syncing description & details: '{act_name}' (ID: {act_id_str})")
+            print(f"[+] Re-syncing & populating Muscle Heatmap property: '{act_name}' (ID: {act_id_str})")
             success = save_activity_to_notion(db_id, act_detail, access_token, existing_page_id=existing_record["page_id"])
             if success:
                 updated_count += 1
@@ -572,7 +589,7 @@ def sync(force_resync_description=False):
     print("\n" + "=" * 60)
     print(f"[+] SYNC COMPLETED SUCCESSFULLY!")
     print(f"    - New Workouts Added: {synced_count}")
-    print(f"    - Existing Workouts Updated with Full Description: {updated_count}")
+    print(f"    - Existing Workouts Updated with Muscle Heatmap Property: {updated_count}")
     print(f"    - Already Up-to-Date: {skipped_count}")
     print("=" * 60)
 
