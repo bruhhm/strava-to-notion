@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 import requests
 from dotenv import load_dotenv
@@ -15,6 +16,8 @@ NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 STRAVA_CLIENT_ID = os.getenv("STRAVA_CLIENT_ID")
 STRAVA_CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET")
 STRAVA_REFRESH_TOKEN = os.getenv("STRAVA_REFRESH_TOKEN")
+
+MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")
 
 NOTION_VERSION = "2022-06-28"
 
@@ -79,6 +82,18 @@ def fetch_strava_activity_photos(access_token, activity_id):
         return urls
     return []
 
+def generate_static_map_url(lat, lng, polyline_str=""):
+    """Generate static map image URL centered on activity GPS location."""
+    if not lat or not lng:
+        return None
+    
+    if MAPBOX_TOKEN and polyline_str:
+        enc_poly = urllib.parse.quote(polyline_str)
+        return f"https://api.mapbox.com/styles/v1/mapbox/outdoors-v11/static/path-4+ff5500-1({enc_poly})/auto/600x300?access_token={MAPBOX_TOKEN}"
+    
+    # OpenStreetMap Static Map fallback
+    return f"https://staticmap.openstreetmap.de/staticmap.php?center={lat},{lng}&zoom=14&size=600x300&maptype=mapnik"
+
 def reverse_geocode(lat, lng):
     """Convert GPS coordinates (latitude, longitude) into readable Place string using OpenStreetMap Nominatim."""
     try:
@@ -117,7 +132,7 @@ def find_existing_database():
     return None
 
 def ensure_database_schema(database_id):
-    """Ensure Notion database schema has Description, Gear, Perceived Exertion, Photos, and Place properties."""
+    """Ensure Notion database schema has Description, Gear, Perceived Exertion, Photos, Place, and Route Map properties."""
     url = f"https://api.notion.com/v1/databases/{database_id}"
     payload = {
         "properties": {
@@ -125,7 +140,8 @@ def ensure_database_schema(database_id):
             "Gear": {"rich_text": {}},
             "Perceived Exertion": {"number": {"format": "number"}},
             "Photos": {"files": {}},
-            "Place": {"rich_text": {}}
+            "Place": {"rich_text": {}},
+            "Route Map": {"files": {}}
         }
     }
     requests.patch(url, headers=get_notion_headers(), json=payload)
@@ -175,6 +191,7 @@ def create_notion_database(parent_page_id):
         "Strava ID": {"rich_text": {}},
         "Strava Link": {"url": {}},
         "Place": {"rich_text": {}},
+        "Route Map": {"files": {}},
         "Description": {"rich_text": {}},
         "Gear": {"rich_text": {}},
         "Perceived Exertion": {"number": {"format": "number"}},
@@ -224,6 +241,7 @@ def get_existing_strava_records(database_id):
             strava_id_prop = props.get("Strava ID", {}).get("rich_text", [])
             photos_prop = props.get("Photos", {}).get("files", [])
             place_prop = props.get("Place", {}).get("rich_text", [])
+            route_map_prop = props.get("Route Map", {}).get("files", [])
             if strava_id_prop:
                 strava_id = strava_id_prop[0].get("plain_text", "").strip()
                 desc_prop = props.get("Description", {}).get("rich_text", [])
@@ -233,7 +251,8 @@ def get_existing_strava_records(database_id):
                     "has_description": has_desc,
                     "has_cover": cover is not None,
                     "has_photos": bool(photos_prop),
-                    "has_place": bool(place_prop and place_prop[0].get("plain_text", "").strip())
+                    "has_place": bool(place_prop and place_prop[0].get("plain_text", "").strip()),
+                    "has_route_map": bool(route_map_prop)
                 }
 
         has_more = data.get("has_more", False)
@@ -316,10 +335,14 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
     # Reverse geocode GPS coordinates to Place string
     place_str = ""
     start_latlng = activity_detail.get("start_latlng")
+    summary_polyline = activity_detail.get("map", {}).get("summary_polyline", "")
+
     if start_latlng and isinstance(start_latlng, list) and len(start_latlng) == 2:
-        place_str = reverse_geocode(start_latlng[0], start_latlng[1])
-    
-    if not place_str:
+        lat, lng = start_latlng[0], start_latlng[1]
+        place_str = reverse_geocode(lat, lng)
+        route_map_url = generate_static_map_url(lat, lng, summary_polyline)
+    else:
+        route_map_url = None
         loc_parts = [p for p in [activity_detail.get("location_city"), activity_detail.get("location_state"), activity_detail.get("location_country")] if p]
         place_str = ", ".join(loc_parts) if loc_parts else ""
 
@@ -361,6 +384,16 @@ def save_activity_to_notion(database_id, activity_detail, access_token, existing
         properties["Relative Effort"] = {"number": suffer_score}
     if place_str:
         properties["Place"] = {"rich_text": [{"text": {"content": place_str}}]}
+    if route_map_url:
+        properties["Route Map"] = {
+            "files": [
+                {
+                    "name": "Route Map Preview",
+                    "type": "external",
+                    "external": {"url": route_map_url}
+                }
+            ]
+        }
     if description_text:
         properties["Description"] = {"rich_text": [{"text": {"content": description_text}}]}
     if gear_name:
@@ -437,7 +470,7 @@ def sync():
                 sys.exit(1)
             db_id = create_notion_database(NOTION_PAGE_ID)
 
-    # Ensure database schema has Description, Gear, Perceived Exertion, Photos, and Place properties
+    # Ensure database schema has Description, Gear, Perceived Exertion, Photos, Place, and Route Map properties
     ensure_database_schema(db_id)
 
     # 2. Strava Activities Fetch
@@ -456,11 +489,12 @@ def sync():
         act_id = summary["id"]
         act_id_str = str(act_id)
         act_name = summary.get("name", "Workout")
+        start_latlng = summary.get("start_latlng")
 
         existing_record = existing_map.get(act_id_str)
         
-        # Skip if record exists and already has Place property populated
-        if existing_record and existing_record["has_place"]:
+        # Skip if record exists and has Route Map property populated for outdoor activities
+        if existing_record and existing_record["has_route_map"]:
             skipped_count += 1
             continue
 
@@ -470,7 +504,7 @@ def sync():
             act_detail = summary  # fallback to summary object
 
         if existing_record:
-            print(f"[+] Updating record with Place property: '{act_name}' (ID: {act_id_str})")
+            print(f"[+] Updating record with Route Map property: '{act_name}' (ID: {act_id_str})")
             success = save_activity_to_notion(db_id, act_detail, access_token, existing_page_id=existing_record["page_id"])
             if success:
                 updated_count += 1
@@ -480,12 +514,12 @@ def sync():
             if success:
                 synced_count += 1
 
-        time.sleep(0.5)  # Gentle rate limiting for Strava, Notion & Nominatim APIs
+        time.sleep(0.5)  # Gentle rate limiting for Strava & Notion APIs
 
     print("\n" + "=" * 60)
     print(f"[+] SYNC COMPLETED SUCCESSFULLY!")
     print(f"    - New Workouts Added: {synced_count}")
-    print(f"    - Existing Workouts Updated with Place Property: {updated_count}")
+    print(f"    - Existing Workouts Updated with Route Map Property: {updated_count}")
     print(f"    - Already Up-to-Date: {skipped_count}")
     print("=" * 60)
 
