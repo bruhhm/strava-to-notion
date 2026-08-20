@@ -4,7 +4,7 @@ import time
 import math
 import io
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import requests
 from PIL import Image
 from dotenv import load_dotenv
@@ -23,6 +23,9 @@ STRAVA_REFRESH_TOKEN = os.getenv("STRAVA_REFRESH_TOKEN")
 MAPBOX_TOKEN = os.getenv("MAPBOX_TOKEN")
 
 NOTION_VERSION = "2022-06-28"
+
+# Start Date Cutoff: May 1, 2026 (Activities prior to May 2026 are excluded)
+SYNC_START_DATE_CUTOFF = "2026-05-01"
 
 def get_notion_headers():
     return {
@@ -48,9 +51,10 @@ def get_strava_access_token():
     print("[+] Strava access token refreshed successfully.")
     return data["access_token"]
 
-def fetch_strava_activities(access_token, days_back=365):
-    print(f"[+] Fetching Strava activity list from the last {days_back} days...")
-    after_timestamp = int((datetime.now(timezone.utc) - timedelta(days=days_back)).timestamp())
+def fetch_strava_activities(access_token, start_cutoff_date=SYNC_START_DATE_CUTOFF):
+    print(f"[+] Fetching Strava activity list starting from {start_cutoff_date}...")
+    cutoff_dt = datetime.strptime(start_cutoff_date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    after_timestamp = int(cutoff_dt.timestamp())
     url = f"https://www.strava.com/api/v3/athlete/activities?after={after_timestamp}&per_page=200"
     headers = {"Authorization": f"Bearer {access_token}"}
     res = requests.get(url, headers=headers)
@@ -58,8 +62,13 @@ def fetch_strava_activities(access_token, days_back=365):
         print(f"[-] Failed to fetch Strava activities: {res.status_code} - {res.text}")
         sys.exit(1)
     activities = res.json()
-    print(f"[+] Found {len(activities)} activities on Strava summary endpoint.")
-    return activities
+    
+    # Strictly filter activities to ensure date >= May 1, 2026
+    filtered_activities = [
+        a for a in activities if a.get("start_date_local", a.get("start_date", ""))[:10] >= start_cutoff_date
+    ]
+    print(f"[+] Found {len(filtered_activities)} activities on Strava starting from {start_cutoff_date}.")
+    return filtered_activities
 
 def fetch_strava_activity_detail(access_token, activity_id):
     """Fetch full detailed activity object from Strava including Description and Gear."""
@@ -519,9 +528,9 @@ def sync(force_resync_description=False):
     # Ensure database schema has Description, Gear, Perceived Exertion, Photos, Place, and Route Map properties
     ensure_database_schema(db_id)
 
-    # 2. Strava Activities Fetch (Fetch all activities from the past 365 days)
+    # 2. Strava Activities Fetch (Fetch activities starting from May 1, 2026)
     access_token = get_strava_access_token()
-    activities_summary = fetch_strava_activities(access_token, days_back=365)
+    activities_summary = fetch_strava_activities(access_token, start_cutoff_date=SYNC_START_DATE_CUTOFF)
 
     # 3. Deduplication and Record map
     existing_map = get_existing_strava_records(db_id)
@@ -536,6 +545,12 @@ def sync(force_resync_description=False):
         act_id_str = str(act_id)
         act_name = summary.get("name", "Workout")
         sport_type = summary.get("sport_type") or summary.get("type", "Workout")
+        act_date = summary.get("start_date_local", summary.get("start_date", ""))[:10]
+
+        # Explicitly enforce May 1, 2026 cutoff filter
+        if act_date < SYNC_START_DATE_CUTOFF:
+            print(f"[-] Skipping activity '{act_name}' ({act_date}) - Before May 1, 2026 cutoff.")
+            continue
 
         existing_record = existing_map.get(act_id_str)
         
